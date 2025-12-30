@@ -1,118 +1,122 @@
-// Background script to handle coordination
+// Background script for WebSocket communication
 
-let isCancelled = false;
-let currentTabId = null;
+let ws = null;
+let isConnected = false;
+let currentTask = null; // { tabId, instructions }
+
+const BACKEND_URL = 'ws://192.168.192.51:8000/ws/connect';
+
+function connectWebSocket() {
+    if (ws) {
+        ws.close();
+    }
+
+    console.log('Connecting to WebSocket...');
+    ws = new WebSocket(BACKEND_URL);
+
+    ws.onopen = () => {
+        console.log('Connected to Backend');
+        isConnected = true;
+        notifyPopup('Connected to Backend Agent', 'success');
+    };
+
+    ws.onmessage = async (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            console.log('Received Message:', data);
+
+            if (data.commands) {
+                // Received commands to execute
+                if (currentTask && currentTask.tabId) {
+                    await chrome.tabs.sendMessage(currentTask.tabId, {
+                        type: 'EXECUTE_ACTIONS',
+                        actions: data.commands
+                    });
+
+                    // For now, let's just complete the request.
+                    notifyPopup('Actions Executed', 'success');
+
+                    // Note: If we want to simulate "Finished", we might want to tell popup to stop spinning?
+                    // The popup currently stops spinning when it gets the Process response.
+                    // But if we want it to spin UNTIL actions are done, we would need to change popup logic.
+                    // For now, relying on the user's provided flow.
+                }
+            } else if (data.error) {
+                notifyPopup(`Error: ${data.error}`, 'error');
+            }
+        } catch (e) {
+            console.error('Error parsing WS message:', e);
+        }
+    };
+
+    ws.onclose = () => {
+        console.log('Disconnected');
+        isConnected = false;
+        notifyPopup('Disconnected from Backend', 'error');
+        // Auto-reconnect after delay
+        setTimeout(connectWebSocket, 5000);
+    };
+
+    ws.onerror = (err) => {
+        console.error('WS Error:', err);
+    };
+}
+
+// Start connection on load
+connectWebSocket();
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.type === 'PROCESS_COMMAND') {
-        isCancelled = false;
-        currentTabId = request.tabId;
-        handleCommand(request, sendResponse);
-        return true; // Will respond asynchronously
-    } else if (request.type === 'CANCEL_COMMAND') {
-        isCancelled = true;
-        // Notify content script to stop
-        if (currentTabId) {
-            chrome.tabs.sendMessage(currentTabId, { type: 'CANCEL_ACTIONS' })
-                .catch(() => { }); // Ignore error if tab closed/unreachable
+        if (!isConnected) {
+            sendResponse({ status: 'error', message: 'Not connected to backend' });
+            return;
         }
+
+        handleCommand(request);
+        sendResponse({ status: 'success' }); // Ack immediately as per request
+        return true;
+    } else if (request.type === 'CANCEL_COMMAND') {
+        // Handle cancellation
+        if (currentTask && currentTask.tabId) {
+            chrome.tabs.sendMessage(currentTask.tabId, { type: 'CANCEL_ACTIONS' })
+                .catch(() => { });
+        }
+        currentTask = null;
         sendResponse({ status: 'cancelled' });
     }
 });
 
-async function handleCommand(request, sendResponse) {
+async function handleCommand(request) {
+    const { tabId, prompt } = request;
+    currentTask = { tabId, instructions: prompt };
+
+    notifyPopup('Capturing screenshot...');
+
     try {
-        const { tabId, prompt } = request;
-
-        if (checkCancelled(sendResponse)) return;
-
-        // 1. Capture Screenshot
-        notifyPopup('Capturing screenshot...');
+        // 1. Capture
         const screenshotDataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
-
-        // API expects raw base64 without prefix
         const base64Image = screenshotDataUrl.replace(/^data:image\/(png|jpeg);base64,/, "");
 
-        console.log('Screenshot captured (length):', base64Image.length);
-
-        if (checkCancelled(sendResponse)) return;
-
-        // 2. call Backend API
-        notifyPopup('Sending to backend (192.168...)...');
-
-        let data;
-        try {
-            const response = await fetch('http://192.168.192.51:8000/process', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    instructions: prompt,
-                    screen_image: base64Image
-                })
-            });
-
-            if (!response.ok) {
-                // Try to read error body
-                const text = await response.text();
-                throw new Error(`API Error: ${response.status} - ${text.substring(0, 50)}`);
-            }
-
-            data = await response.json();
-
-        } catch (networkError) {
-            console.error('Network error:', networkError);
-            throw new Error('Failed to connect to backend: ' + networkError.message);
+        // 2. Send to Backend via WS
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            notifyPopup('Sending to AI...');
+            ws.send(JSON.stringify({
+                instructions: prompt,
+                screen_image: base64Image
+            }));
+        } else {
+            notifyPopup('WebSocket not ready', 'error');
         }
-
-        if (checkCancelled(sendResponse)) return;
-
-        // 3. Process Response
-        notifyPopup('Received instructions. Executing...');
-        const commands = data.commands || [];
-        console.log('Instructions received:', commands);
-
-        if (commands.length === 0) {
-            notifyPopup('Backend returned no commands.', 'success');
-        }
-
-        // 4. Send instructions to content script
-        await chrome.tabs.sendMessage(tabId, {
-            type: 'EXECUTE_ACTIONS',
-            actions: commands
-        });
-
-        if (!isCancelled) {
-            sendResponse({ status: 'success', message: 'Workflow completed successfully' });
-        }
-
-    } catch (error) {
-        console.error('Background error:', error);
-        notifyPopup(`Error: ${error.message}`, 'error');
-        try {
-            sendResponse({ status: 'error', message: error.message });
-        } catch (e) { }
+    } catch (e) {
+        console.error('Screenshot failed:', e);
+        notifyPopup('Screenshot failed: ' + e.message, 'error');
     }
-}
-
-function checkCancelled(sendResponse) {
-    if (isCancelled) {
-        notifyPopup('Process cancelled.', 'error');
-        sendResponse({ status: 'cancelled' });
-        return true;
-    }
-    return false;
 }
 
 function notifyPopup(message, statusType = 'info') {
-    if (isCancelled) return;
-
     chrome.runtime.sendMessage({
         type: 'STATUS_UPDATE',
         text: message,
         statusType
-    }).catch(() => {
-        // Popup might be closed, ignore
-    });
+    }).catch(() => { });
 }
