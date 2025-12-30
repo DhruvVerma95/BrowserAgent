@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser Agent</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Browser Agent</h1>
+            <div class="status-badge" id="statusBadge">Ready</div>
+        </header>
+
+        <main>
+            <div class="input-group">
+                <label for="userPrompt">What would you like to do?</label>
+                <textarea id="userPrompt" placeholder="e.g., Go to LinkedIn and apply for frontend jobs..."></textarea>
+            </div>
+
+            <div class="button-group">
+                <button id="runBtn" class="primary-btn">
+                    <span class="btn-text">Execute Command</span>
+                    <div class="loader hidden"></div>
+                </button>
+                <button id="cancelBtn" class="secondary-btn hidden">Cancel</button>
+            </div>
+        </main>
+
+        <footer>
+            <div class="log-area" id="logArea">
+                <p class="placeholder-text">Waiting for input...</p>
+            </div>
+        </footer>
+    </div>
+    <script src="popup.js"></script>
+</body>
+
+</html>
